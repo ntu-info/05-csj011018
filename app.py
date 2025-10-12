@@ -92,54 +92,79 @@ def create_app():
     @app.get("/dissociate/locations/<coords1>/<coords2>", endpoint="dissociate_locations")
     def dissociate_locations(coords1: str, coords2: str):
         """
-        Coordinates are passed as x_y_z (underscores, not commas).
-        Example:
-        /dissociate/locations/0_-52_26/-2_50_-6
+        回傳：提到 coords1 但沒提到 coords2 的 study_id
+        - 座標格式：x_y_z（底線分隔，整數 OK）
+        - 用 3D 半徑（mm）做容忍匹配（預設 2mm，可用 ?radius=4 調整）
         """
+        from math import isfinite
         def parse_xyz(s: str):
-            x, y, z = map(int, s.split("_"))
+            x, y, z = [float(tok) for tok in s.split("_")]
+            for v in (x, y, z):
+                if not isfinite(v):
+                    abort(400, "Invalid coordinate")
             return {"x": x, "y": y, "z": z}
 
         c1 = parse_xyz(coords1)
         c2 = parse_xyz(coords2)
 
+        try:
+            radius = float(request.args.get("radius", "2"))  # 預設 2mm
+        except Exception:
+            radius = 2.0
+
         eng = get_engine()
         with eng.begin() as conn:
             conn.execute(text("SET search_path TO ns, public;"))
 
+            # 用 ST_3DDistance 半徑匹配；ns.coordinates.geom 是 POINTZ
             q = text("""
                 WITH a AS (
                     SELECT DISTINCT study_id
                     FROM ns.coordinates
-                    WHERE x = :x1 AND y = :y1 AND z = :z1
+                    WHERE ST_3DDistance(geom, ST_MakePoint(:x1,:y1,:z1)) <= :r
                 ),
                 b AS (
                     SELECT DISTINCT study_id
                     FROM ns.coordinates
-                    WHERE x = :x2 AND y = :y2 AND z = :z2
+                    WHERE ST_3DDistance(geom, ST_MakePoint(:x2,:y2,:z2)) <= :r
                 )
                 SELECT a.study_id
                 FROM a
                 LEFT JOIN b USING (study_id)
                 WHERE b.study_id IS NULL
                 ORDER BY a.study_id
-                LIMIT 1000
+                LIMIT 2000
             """)
-            rows = conn.execute(q, {
+            ids = conn.execute(q, {
                 "x1": c1["x"], "y1": c1["y"], "z1": c1["z"],
                 "x2": c2["x"], "y2": c2["y"], "z2": c2["z"],
+                "r": radius
             }).scalars().all()
+
+            meta = []
+            if ids:
+                rows = conn.execute(text("""
+                    SELECT m.study_id, m.title, m.journal, m.year
+                    FROM ns.metadata m
+                    WHERE m.study_id = ANY(:ids)
+                    ORDER BY m.study_id
+                    LIMIT 100
+                """), {"ids": ids}).mappings().all()
+                meta = [dict(r) for r in rows]
 
             return jsonify({
                 "ok": True,
                 "mode": "locations",
+                "radius_mm": radius,
                 "a_but_not_b": {
-                    "coord_a": c1,
-                    "coord_b": c2,
-                    "study_ids": rows,
-                    "count": len(rows)
+                    "coord_a": c1, "coord_b": c2,
+                    "count": len(ids),
+                    "study_ids": ids[:200],
+                    "sample_metadata": meta
                 }
             })
+
+
 
     
     def test_db():
