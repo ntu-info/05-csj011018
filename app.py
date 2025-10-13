@@ -144,13 +144,13 @@ def create_app():
                     SELECT DISTINCT study_id
                     FROM ns.coordinates
                     WHERE x IS NOT NULL AND y IS NOT NULL AND z IS NOT NULL
-                      AND ((x - :x1)^2 + (y - :y1)^2 + (z - :z1)^2) <= :rin2
+                      AND ((x - :x1)*(x - :x1) + (y - :y1)*(y - :y1) + (z - :z1)*(z - :z1)) <= :rin2
                 ),
                 b AS (
                     SELECT DISTINCT study_id
                     FROM ns.coordinates
                     WHERE x IS NOT NULL AND y IS NOT NULL AND z IS NOT NULL
-                      AND ((x - :x2)^2 + (y - :y2)^2 + (z - :z2)^2) <= :rout2
+                      AND ((x - :x2)*(x - :x2) + (y - :y2)*(y - :y2) + (z - :z2)*(z - :z2)) <= :rout2
                 )
                 SELECT a.study_id
                 FROM a
