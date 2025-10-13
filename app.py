@@ -41,39 +41,56 @@ def create_app():
     # --- Dissociate by TERMS: "A but not B" ---
     @app.get("/dissociate/terms/<term_a>/<term_b>", endpoint="dissociate_terms")
     def dissociate_terms(term_a: str, term_b: str):
+        """
+        在 ns.metadata.title 做子字串比對：
+        - 包含 term_a
+        - 並且不包含 term_b
+        例：
+        /dissociate/terms/posterior_cingulate/ventromedial_prefrontal
+        """
+        # 1) 正規化：底線 → 空白；去頭尾空白
         def norm(s: str) -> str:
-            return s.replace("_", " ").strip().lower()
+            return s.replace("_", " ").strip()
+
+        ta = norm(term_a)
+        tb = norm(term_b)
+
+        # 2) LIKE 模式（ILIKE 為大小寫不敏感）
+        pat_a = f"%{ta}%"
+        pat_b = f"%{tb}%"
+
+        # 可選：?limit= 回傳上限（預設 1000）
         try:
-            minw = float(request.args.get("minw", "0"))
+            limit = int(request.args.get("limit", "1000"))
+            if limit <= 0 or limit > 5000:
+                limit = 1000
         except Exception:
-            minw = 0.0
-        ta, tb = norm(term_a), norm(term_b)
+            limit = 1000
 
         eng = get_engine()
         with eng.begin() as conn:
             conn.execute(text("SET search_path TO ns, public;"))
-            ids = conn.execute(text("""
-                WITH a AS (
-                    SELECT DISTINCT study_id
-                    FROM ns.annotations_terms
-                    WHERE lower(term) = :ta AND weight > :minw
-                ),
-                b AS (
-                    SELECT DISTINCT study_id
-                    FROM ns.annotations_terms
-                    WHERE lower(term) = :tb AND weight > :minw
-                )
-                SELECT a.study_id
-                FROM a LEFT JOIN b USING (study_id)
-                WHERE b.study_id IS NULL
-                ORDER BY a.study_id
-                LIMIT 2000
-            """), {"ta": ta, "tb": tb, "minw": minw}).scalars().all()
+            rows = conn.execute(
+                text(f"""
+                    SELECT study_id, title, journal, year
+                    FROM ns.metadata
+                    WHERE title ILIKE :pat_a
+                      AND title NOT ILIKE :pat_b
+                    ORDER BY study_id
+                    LIMIT :lim
+                """),
+                {"pat_a": pat_a, "pat_b": pat_b, "lim": limit},
+            ).mappings().all()
 
-        return jsonify({"ok": True, "mode": "terms",
-                        "a_but_not_b": {"term_a": term_a, "term_b": term_b,
-                                        "min_weight": minw,
-                                        "count": len(ids), "study_ids": ids[:200]}})
+        results = [dict(r) for r in rows]
+
+        return jsonify({
+            "ok": True,
+            "mode": "title_contains_a_not_b",
+            "params": {"term_a": term_a, "term_b": term_b},
+            "count": len(results),
+            "studies": results
+        })
     
     """
     @app.get("/locations/<coords>/studies", endpoint="locations_studies")
@@ -82,36 +99,72 @@ def create_app():
         return jsonify([x, y, z])
     """
     # --- Dissociate by LOCATIONS: "A(x1,y1,z1) but not B(x2,y2,z2)" ---
-    @app.get("/locations/<coords>/studies", endpoint="locations_studies")
-    def get_studies_by_coordinates(coords: str):
+    @app.get("/dissociate/locations/<coords1>/<coords2>", endpoint="dissociate_locations")
+    def dissociate_locations(coords1: str, coords2: str):
         """
-        回傳：在 coords 附近（3D 半徑）出現過座標的 studies
-        - 座標格式：x_y_z，例如 0_-52_26
-        - 半徑（mm）：?radius=2  預設 2
+        用 coordinates.parquet 的 x,y,z 欄位做 3D 歐式距離：
+        - A：距離 coords1 在 r_in 以內（含邊界）
+        - B：距離 coords2 在 r_out 以內（含邊界）
+        回傳 A \ B，也就是「靠近 coords1 且 不靠近 coords2」的 study_id。
+        
+        參數：
+        - coords1 / coords2：格式 "x_y_z"（底線分隔），支援整數或小數
+        - ?r_in=2  ：coords1 的內圈半徑（預設 2，單位同座標單位，MNI 通常 mm）
+        - ?r_out=2 ：coords2 的外圈半徑（預設 2）
         """
         def parse_xyz(s: str):
-            x, y, z = [float(tok) for tok in s.split("_")]
+            try:
+                x, y, z = [float(tok) for tok in s.split("_")]
+            except Exception:
+                abort(400, f"Invalid coordinate format: {s}. Use x_y_z, e.g., 0_-52_26")
             return {"x": x, "y": y, "z": z}
 
-        try:
-            radius = float(request.args.get("radius", "2"))
-        except Exception:
-            radius = 2.0
+        c1 = parse_xyz(coords1)
+        c2 = parse_xyz(coords2)
 
-        c = parse_xyz(coords)
+        # 半徑參數（可用 querystring 覆蓋）
+        try:
+            r_in = float(request.args.get("r_in", "2"))
+        except Exception:
+            r_in = 2.0
+        try:
+            r_out = float(request.args.get("r_out", "2"))
+        except Exception:
+            r_out = 2.0
+
+        r_in2  = r_in  * r_in   # 距離平方，避免在 SQL 裡開根號
+        r_out2 = r_out * r_out
 
         eng = get_engine()
         with eng.begin() as conn:
             conn.execute(text("SET search_path TO ns, public;"))
+            # 用 x,y,z 欄位直接做歐式距離平方（NULL 先排除）
             q = text("""
-                SELECT DISTINCT study_id
-                FROM ns.coordinates
-                WHERE ST_3DDistance(geom, ST_MakePoint(:x,:y,:z)) <= :r
-                ORDER BY study_id
+                WITH a AS (
+                    SELECT DISTINCT study_id
+                    FROM ns.coordinates
+                    WHERE x IS NOT NULL AND y IS NOT NULL AND z IS NOT NULL
+                      AND ((x - :x1)^2 + (y - :y1)^2 + (z - :z1)^2) <= :rin2
+                ),
+                b AS (
+                    SELECT DISTINCT study_id
+                    FROM ns.coordinates
+                    WHERE x IS NOT NULL AND y IS NOT NULL AND z IS NOT NULL
+                      AND ((x - :x2)^2 + (y - :y2)^2 + (z - :z2)^2) <= :rout2
+                )
+                SELECT a.study_id
+                FROM a
+                LEFT JOIN b USING (study_id)
+                WHERE b.study_id IS NULL
+                ORDER BY a.study_id
                 LIMIT 2000
             """)
-            ids = conn.execute(q, {"x": c["x"], "y": c["y"], "z": c["z"], "r": radius}).scalars().all()
+            ids = conn.execute(q, {
+                "x1": c1["x"], "y1": c1["y"], "z1": c1["z"], "rin2": r_in2,
+                "x2": c2["x"], "y2": c2["y"], "z2": c2["z"], "rout2": r_out2
+            }).scalars().all()
 
+            # 帶些 metadata 方便檢視
             meta = []
             if ids:
                 rows = conn.execute(text("""
@@ -125,13 +178,18 @@ def create_app():
 
         return jsonify({
             "ok": True,
-            "mode": "location_only",
-            "coord": c,
-            "radius_mm": radius,
-            "count": len(ids),
-            "study_ids": ids[:200],
-            "sample_metadata": meta
+            "mode": "locations_xyzdist",
+            "params": {
+                "coord_a": c1, "coord_b": c2,
+                "r_in": r_in, "r_out": r_out
+            },
+            "a_but_not_b": {
+                "count": len(ids),
+                "study_ids": ids[:200],
+                "sample_metadata": meta
+            }
         })
+
 
     @app.get("/test_db", endpoint="test_db")
     
