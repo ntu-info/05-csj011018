@@ -1,5 +1,5 @@
 # app.py
-from flask import Flask, jsonify, abort, send_file
+from flask import Flask, jsonify, abort, send_file, request
 import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL
@@ -39,7 +39,6 @@ def create_app():
         return term
     """
     # --- Dissociate by TERMS: "A but not B" ---
-    from flask import Flask, request
     @app.get("/terms/<term>/studies", endpoint="terms_studies")
     def get_studies_by_term(term: str):
         """
