@@ -99,6 +99,70 @@ def create_app():
         return jsonify([x, y, z])
     """
     # --- Dissociate by LOCATIONS: "A(x1,y1,z1) but not B(x2,y2,z2)" ---
+    from flask import request  # 檔頭記得已經有
+
+    @app.get("/dissociate/locations/<coords1>/<coords2>", endpoint="dissociate_locations")
+    def dissociate_locations(coords1: str, coords2: str):
+        """
+        A: 距離 coords1 在 r_in 以內
+        B: 距離 coords2 在 r_out 以內
+        回傳 A\B（靠近 coords1 且 不靠近 coords2）
+        參數：
+            - coords1/coords2: "x_y_z"（可浮點）
+            - ?r_in=2  、?r_out=2  （單位同座標，MNI 通常 mm）
+        """
+        def parse_xyz(s: str):
+            x, y, z = [float(tok) for tok in s.split("_")]
+            return {"x": x, "y": y, "z": z}
+
+        c1 = parse_xyz(coords1)
+        c2 = parse_xyz(coords2)
+
+        try:
+            r_in  = float(request.args.get("r_in", "2"))
+            r_out = float(request.args.get("r_out", "2"))
+        except Exception:
+            r_in, r_out = 2.0, 2.0
+
+        r_in2  = r_in  * r_in
+        r_out2 = r_out * r_out
+
+        eng = get_engine()
+        with eng.begin() as conn:
+            conn.execute(text("SET search_path TO ns, public;"))
+            # 用乘法做距離平方，避免使用 ^（在 PG 不是次方）
+            q = text("""
+                WITH a AS (
+                    SELECT DISTINCT study_id
+                    FROM ns.coordinates
+                    WHERE x IS NOT NULL AND y IS NOT NULL AND z IS NOT NULL
+                        AND ((x - :x1)*(x - :x1) + (y - :y1)*(y - :y1) + (z - :z1)*(z - :z1)) <= :rin2
+                ),
+                b AS (
+                    SELECT DISTINCT study_id
+                    FROM ns.coordinates
+                    WHERE x IS NOT NULL AND y IS NOT NULL AND z IS NOT NULL
+                        AND ((x - :x2)*(x - :x2) + (y - :y2)*(y - :y2) + (z - :z2)*(z - :z2)) <= :rout2
+                )
+                SELECT a.study_id
+                FROM a
+                LEFT JOIN b USING (study_id)
+                WHERE b.study_id IS NULL
+                ORDER BY a.study_id
+                LIMIT 2000
+            """)
+            ids = conn.execute(q, {
+                "x1": c1["x"], "y1": c1["y"], "z1": c1["z"], "rin2": r_in2,
+                "x2": c2["x"], "y2": c2["y"], "z2": c2["z"], "rout2": r_out2
+            }).scalars().all()
+
+        return jsonify({
+            "ok": True,
+            "mode": "locations_xyzdist",
+            "params": {"coord_a": c1, "coord_b": c2, "r_in": r_in, "r_out": r_out},
+            "a_but_not_b": {"count": len(ids), "study_ids": ids[:200]}
+        })
+
     @app.get("/dissociate/locations/<coords1>/<coords2>", endpoint="dissociate_locations")
     def dissociate_locations(coords1: str, coords2: str):
         """
