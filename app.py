@@ -101,22 +101,14 @@ def create_app():
     # --- Dissociate by LOCATIONS: "A(x1,y1,z1) but not B(x2,y2,z2)" ---
     @app.get("/dissociate/locations/<coords1>/<coords2>", endpoint="dissociate_locations")
     def dissociate_locations(coords1: str, coords2: str):
-        """
-        A: 與 coords1 的 3D 距離 <= r_in
-        B: 與 coords2 的 3D 距離 <= r_out
-        回傳 A\\B
-        參數：coords1/coords2 = "x_y_z"；?r_in=2、?r_out=2
-        """
         def parse_xyz(s: str):
-            try:
-                x, y, z = [float(tok) for tok in s.split("_")]
-            except Exception:
-                abort(400, f"Invalid coordinate format: {s}. Use x_y_z, e.g., 0_-52_26")
+            x, y, z = [float(tok) for tok in s.split("_")]
             return {"x": x, "y": y, "z": z}
 
         c1 = parse_xyz(coords1)
         c2 = parse_xyz(coords2)
 
+        from flask import request, abort
         try:
             r_in  = float(request.args.get("r_in", "2"))
             r_out = float(request.args.get("r_out", "2"))
@@ -131,13 +123,19 @@ def create_app():
                     SELECT DISTINCT study_id
                     FROM ns.coordinates
                     WHERE geom IS NOT NULL
-                    AND ST_3DDistance(geom, ST_MakePoint(:x1,:y1,:z1)) <= :rin
+                    AND ST_3DDistance(
+                            geom,
+                            ST_SetSRID(ST_MakePoint(:x1,:y1,:z1), ST_SRID(geom))
+                        ) <= :rin
                 ),
                 b AS (
                     SELECT DISTINCT study_id
                     FROM ns.coordinates
                     WHERE geom IS NOT NULL
-                    AND ST_3DDistance(geom, ST_MakePoint(:x2,:y2,:z2)) <= :rout
+                    AND ST_3DDistance(
+                            geom,
+                            ST_SetSRID(ST_MakePoint(:x2,:y2,:z2), ST_SRID(geom))
+                        ) <= :rout
                 )
                 SELECT a.study_id
                 FROM a LEFT JOIN b USING (study_id)
