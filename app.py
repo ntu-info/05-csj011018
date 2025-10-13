@@ -33,113 +33,38 @@ def create_app():
     @app.get("/img", endpoint="show_img")
     def show_img():
         return send_file("amygdala.gif", mimetype="image/gif")
-
+    """
     @app.get("/terms/<term>/studies", endpoint="terms_studies")
     def get_studies_by_term(term):
         return term
-
-    @app.get("/locations/<coords>/studies", endpoint="locations_studies")
-    def get_studies_by_coordinates(coords):
-        x, y, z = map(int, coords.split("_"))
-        return jsonify([x, y, z])
-
-    @app.get("/test_db", endpoint="test_db")
-
+    """
     # --- Dissociate by TERMS: "A but not B" ---
-    @app.get("/dissociate/terms/<term_a>/<term_b>", endpoint="dissociate_terms")
-    def dissociate_terms(term_a: str, term_b: str):
+    from flask import Flask, request
+    @app.get("/terms/<term>/studies", endpoint="terms_studies")
+    def get_studies_by_term(term: str):
         """
-        Return studies that mention term_a BUT NOT term_b.
-        Example:
-        /dissociate/terms/posterior_cingulate/ventromedial_prefrontal
+        回傳：有提到 term 的 study_id（可用 ?minw=0.01 設定 TF-IDF 門檻）
+        例：/terms/posterior_cingulate/studies?minw=0.01
         """
-        eng = get_engine()
-        with eng.begin() as conn:
-            conn.execute(text("SET search_path TO ns, public;"))
-
-            q = text("""
-                WITH a AS (
-                    SELECT DISTINCT study_id
-                    FROM ns.annotations_terms
-                    WHERE term = :term_a
-                ),
-                b AS (
-                    SELECT DISTINCT study_id
-                    FROM ns.annotations_terms
-                    WHERE term = :term_b
-                )
-                SELECT a.study_id
-                FROM a
-                LEFT JOIN b USING (study_id)
-                WHERE b.study_id IS NULL
-                ORDER BY a.study_id
-                LIMIT 1000
-            """)
-            rows = conn.execute(q, {"term_a": term_a, "term_b": term_b}).scalars().all()
-
-            return jsonify({
-                "ok": True,
-                "mode": "terms",
-                "a_but_not_b": {
-                    "term_a": term_a,
-                    "term_b": term_b,
-                    "study_ids": rows,
-                    "count": len(rows)
-                }
-            })
-
-    # --- Dissociate by LOCATIONS: "A(x1,y1,z1) but not B(x2,y2,z2)" ---
-    @app.get("/dissociate/locations/<coords1>/<coords2>", endpoint="dissociate_locations")
-    def dissociate_locations(coords1: str, coords2: str):
-        """
-        回傳：提到 coords1 但沒提到 coords2 的 study_id
-        - 座標格式：x_y_z（底線分隔，整數 OK）
-        - 用 3D 半徑（mm）做容忍匹配（預設 2mm，可用 ?radius=4 調整）
-        """
-        from math import isfinite
-        def parse_xyz(s: str):
-            x, y, z = [float(tok) for tok in s.split("_")]
-            for v in (x, y, z):
-                if not isfinite(v):
-                    abort(400, "Invalid coordinate")
-            return {"x": x, "y": y, "z": z}
-
-        c1 = parse_xyz(coords1)
-        c2 = parse_xyz(coords2)
+        def norm(s: str) -> str:
+            return s.replace("_", " ").strip().lower()
 
         try:
-            radius = float(request.args.get("radius", "2"))  # 預設 2mm
+            minw = float(request.args.get("minw", "0"))
         except Exception:
-            radius = 2.0
+            minw = 0.0
 
         eng = get_engine()
         with eng.begin() as conn:
             conn.execute(text("SET search_path TO ns, public;"))
-
-            # 用 ST_3DDistance 半徑匹配；ns.coordinates.geom 是 POINTZ
             q = text("""
-                WITH a AS (
-                    SELECT DISTINCT study_id
-                    FROM ns.coordinates
-                    WHERE ST_3DDistance(geom, ST_MakePoint(:x1,:y1,:z1)) <= :r
-                ),
-                b AS (
-                    SELECT DISTINCT study_id
-                    FROM ns.coordinates
-                    WHERE ST_3DDistance(geom, ST_MakePoint(:x2,:y2,:z2)) <= :r
-                )
-                SELECT a.study_id
-                FROM a
-                LEFT JOIN b USING (study_id)
-                WHERE b.study_id IS NULL
-                ORDER BY a.study_id
+                SELECT DISTINCT study_id
+                FROM ns.annotations_terms
+                WHERE lower(term) = :term AND weight > :minw
+                ORDER BY study_id
                 LIMIT 2000
             """)
-            ids = conn.execute(q, {
-                "x1": c1["x"], "y1": c1["y"], "z1": c1["z"],
-                "x2": c2["x"], "y2": c2["y"], "z2": c2["z"],
-                "r": radius
-            }).scalars().all()
+            ids = conn.execute(q, {"term": norm(term), "minw": minw}).scalars().all()
 
             meta = []
             if ids:
@@ -152,20 +77,74 @@ def create_app():
                 """), {"ids": ids}).mappings().all()
                 meta = [dict(r) for r in rows]
 
-            return jsonify({
-                "ok": True,
-                "mode": "locations",
-                "radius_mm": radius,
-                "a_but_not_b": {
-                    "coord_a": c1, "coord_b": c2,
-                    "count": len(ids),
-                    "study_ids": ids[:200],
-                    "sample_metadata": meta
-                }
-            })
+        return jsonify({
+            "ok": True,
+            "mode": "term_only",
+            "term": term,
+            "min_weight": minw,
+            "count": len(ids),
+            "study_ids": ids[:200],
+            "sample_metadata": meta
+        })
+    """
+    @app.get("/locations/<coords>/studies", endpoint="locations_studies")
+    def get_studies_by_coordinates(coords):
+        x, y, z = map(int, coords.split("_"))
+        return jsonify([x, y, z])
+    """
+    # --- Dissociate by LOCATIONS: "A(x1,y1,z1) but not B(x2,y2,z2)" ---
+    @app.get("/locations/<coords>/studies", endpoint="locations_studies")
+    def get_studies_by_coordinates(coords: str):
+        """
+        回傳：在 coords 附近（3D 半徑）出現過座標的 studies
+        - 座標格式：x_y_z，例如 0_-52_26
+        - 半徑（mm）：?radius=2  預設 2
+        """
+        def parse_xyz(s: str):
+            x, y, z = [float(tok) for tok in s.split("_")]
+            return {"x": x, "y": y, "z": z}
 
+        try:
+            radius = float(request.args.get("radius", "2"))
+        except Exception:
+            radius = 2.0
 
+        c = parse_xyz(coords)
 
+        eng = get_engine()
+        with eng.begin() as conn:
+            conn.execute(text("SET search_path TO ns, public;"))
+            q = text("""
+                SELECT DISTINCT study_id
+                FROM ns.coordinates
+                WHERE ST_3DDistance(geom, ST_MakePoint(:x,:y,:z)) <= :r
+                ORDER BY study_id
+                LIMIT 2000
+            """)
+            ids = conn.execute(q, {"x": c["x"], "y": c["y"], "z": c["z"], "r": radius}).scalars().all()
+
+            meta = []
+            if ids:
+                rows = conn.execute(text("""
+                    SELECT m.study_id, m.title, m.journal, m.year
+                    FROM ns.metadata m
+                    WHERE m.study_id = ANY(:ids)
+                    ORDER BY m.study_id
+                    LIMIT 100
+                """), {"ids": ids}).mappings().all()
+                meta = [dict(r) for r in rows]
+
+        return jsonify({
+            "ok": True,
+            "mode": "location_only",
+            "coord": c,
+            "radius_mm": radius,
+            "count": len(ids),
+            "study_ids": ids[:200],
+            "sample_metadata": meta
+        })
+
+    @app.get("/test_db", endpoint="test_db")
     
     def test_db():
         eng = get_engine()
