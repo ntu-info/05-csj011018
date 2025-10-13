@@ -99,14 +99,12 @@ def create_app():
         return jsonify([x, y, z])
     """
     # --- Dissociate by LOCATIONS: "A(x1,y1,z1) but not B(x2,y2,z2)" ---
-    from flask import request  # 檔頭記得已經有
-
     @app.get("/dissociate/locations/<coords1>/<coords2>", endpoint="dissociate_locations")
     def dissociate_locations(coords1: str, coords2: str):
         """
         A: 距離 coords1 在 r_in 以內
         B: 距離 coords2 在 r_out 以內
-        回傳 A\B（靠近 coords1 且 不靠近 coords2）
+        回傳 A\\B（靠近 coords1 且 不靠近 coords2）
         參數：
             - coords1/coords2: "x_y_z"（可浮點）
             - ?r_in=2  、?r_out=2  （單位同座標，MNI 通常 mm）
@@ -169,7 +167,7 @@ def create_app():
         用 coordinates.parquet 的 x,y,z 欄位做 3D 歐式距離：
         - A：距離 coords1 在 r_in 以內（含邊界）
         - B：距離 coords2 在 r_out 以內（含邊界）
-        回傳 A \ B，也就是「靠近 coords1 且 不靠近 coords2」的 study_id。
+        回傳 A \\ B，也就是「靠近 coords1 且 不靠近 coords2」的 study_id。
         
         參數：
         - coords1 / coords2：格式 "x_y_z"（底線分隔），支援整數或小數
