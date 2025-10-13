@@ -39,52 +39,42 @@ def create_app():
         return term
     """
     # --- Dissociate by TERMS: "A but not B" ---
-    @app.get("/terms/<term>/studies", endpoint="terms_studies")
-    def get_studies_by_term(term: str):
-        """
-        回傳：有提到 term 的 study_id（可用 ?minw=0.01 設定 TF-IDF 門檻）
-        例：/terms/posterior_cingulate/studies?minw=0.01
-        """
+    @app.get("/dissociate/terms/<term_a>/<term_b>", endpoint="dissociate_terms")
+    def dissociate_terms(term_a: str, term_b: str):
         def norm(s: str) -> str:
             return s.replace("_", " ").strip().lower()
-
         try:
             minw = float(request.args.get("minw", "0"))
         except Exception:
             minw = 0.0
+        ta, tb = norm(term_a), norm(term_b)
 
         eng = get_engine()
         with eng.begin() as conn:
             conn.execute(text("SET search_path TO ns, public;"))
-            q = text("""
-                SELECT DISTINCT study_id
-                FROM ns.annotations_terms
-                WHERE lower(term) = :term AND weight > :minw
-                ORDER BY study_id
+            ids = conn.execute(text("""
+                WITH a AS (
+                    SELECT DISTINCT study_id
+                    FROM ns.annotations_terms
+                    WHERE lower(term) = :ta AND weight > :minw
+                ),
+                b AS (
+                    SELECT DISTINCT study_id
+                    FROM ns.annotations_terms
+                    WHERE lower(term) = :tb AND weight > :minw
+                )
+                SELECT a.study_id
+                FROM a LEFT JOIN b USING (study_id)
+                WHERE b.study_id IS NULL
+                ORDER BY a.study_id
                 LIMIT 2000
-            """)
-            ids = conn.execute(q, {"term": norm(term), "minw": minw}).scalars().all()
+            """), {"ta": ta, "tb": tb, "minw": minw}).scalars().all()
 
-            meta = []
-            if ids:
-                rows = conn.execute(text("""
-                    SELECT m.study_id, m.title, m.journal, m.year
-                    FROM ns.metadata m
-                    WHERE m.study_id = ANY(:ids)
-                    ORDER BY m.study_id
-                    LIMIT 100
-                """), {"ids": ids}).mappings().all()
-                meta = [dict(r) for r in rows]
-
-        return jsonify({
-            "ok": True,
-            "mode": "term_only",
-            "term": term,
-            "min_weight": minw,
-            "count": len(ids),
-            "study_ids": ids[:200],
-            "sample_metadata": meta
-        })
+        return jsonify({"ok": True, "mode": "terms",
+                        "a_but_not_b": {"term_a": term_a, "term_b": term_b,
+                                        "min_weight": minw,
+                                        "count": len(ids), "study_ids": ids[:200]}})
+    
     """
     @app.get("/locations/<coords>/studies", endpoint="locations_studies")
     def get_studies_by_coordinates(coords):
